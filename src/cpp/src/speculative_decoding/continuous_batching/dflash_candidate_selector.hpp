@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -59,6 +60,12 @@ public:
     // inference timer stops, so the draft adds this to its inference duration.
     float take_inference_duration();
 
+    // A gated scorer reads the draft hidden states of the scored rows. The source hands over the
+    // 'draft_hidden_states' tensor of the live draft infer request, whose rows match the gathered logits rows
+    // one to one. The buffer stays valid until the next draft forward overwrites it.
+    using HiddenRowsSource = std::function<ov::Tensor()>;
+    void set_hidden_rows_source(HiddenRowsSource source);
+
 private:
     void score_candidates();
     void infer(ov::InferRequest& request);
@@ -68,6 +75,9 @@ private:
     // exactly one of them
     std::optional<ov::InferRequest> m_candidate_scorer;
     std::optional<ov::InferRequest> m_markov_step;
+    // a gated scorer reads the backbone hidden states of the scored rows
+    bool m_gated = false;
+    HiddenRowsSource m_hidden_rows_source;
 
     std::vector<SampledBlock> m_blocks;
     ov::Tensor m_logits;

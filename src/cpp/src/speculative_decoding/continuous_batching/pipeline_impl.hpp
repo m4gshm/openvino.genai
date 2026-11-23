@@ -487,6 +487,14 @@ protected:
         m_dflash_candidate_position_offset = candidate_position_offset;
         m_dflash_candidate_selector = candidate_selector;
         m_model_runner->enable_dflash_draft(candidate_position_offset);
+        // A gated scorer reads the 'draft_hidden_states' output of the live draft request, whose rows match the
+        // gathered logits rows one to one; the sampler reads it before the next draft forward overwrites it.
+        if (candidate_selector) {
+            auto runner = m_model_runner;
+            candidate_selector->set_hidden_rows_source([runner]() -> ov::Tensor {
+                return runner->get_infer_request().get_tensor("draft_hidden_states");
+            });
+        }
         m_sampler->set_block_sampling(candidate_position_offset, std::move(candidate_selector));
     }
 };

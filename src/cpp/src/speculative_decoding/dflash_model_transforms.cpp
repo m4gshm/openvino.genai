@@ -43,6 +43,7 @@ constexpr const char* MARKOV_HEAD_TOP_K = "markov_head_top_k";
 constexpr const char* DFLASH_MARKOV_HEAD_COMPUTATION = "dflash_markov_head_computation";
 constexpr const char* MARKOV_HEAD_MODEL_FILE_NAME = "openvino_markov_head_model.xml";
 constexpr const char* VANILLA_MARKOV_HEAD = "vanilla";
+constexpr const char* GATED_MARKOV_HEAD = "dflash2";
 // Below this K, the candidate scorer often misses the token the Markov head would pick, and acceptance drops.
 constexpr size_t MIN_RECOMMENDED_MARKOV_HEAD_TOP_K = 8;
 
@@ -446,10 +447,10 @@ DFlashRTInfo extract_dflash_info_from_config(ov::AnyMap& config) {
                     MARKOV_HEAD_TOP_K,
                     " applies only to drafts with a Markov head that are loaded with draft_model(<draft folder>).");
     if (info.markov_rank > 0) {
-        OPENVINO_ASSERT(info.markov_head_type == VANILLA_MARKOV_HEAD,
+        OPENVINO_ASSERT(info.markov_head_type == VANILLA_MARKOV_HEAD || info.markov_head_type == GATED_MARKOV_HEAD,
                         "Unsupported markov_head_type '",
                         info.markov_head_type,
-                        "'. Supported Markov heads: vanilla.");
+                        "'. Supported Markov heads: vanilla, dflash2.");
         OPENVINO_ASSERT(info.markov_head_computation,
                         "The draft has a Markov head but no Markov head model. Load the draft with "
                         "draft_model(<draft folder>) so that ",
@@ -523,15 +524,39 @@ void select_markov_head_computation(const std::shared_ptr<ov::Model>& markov_hea
     if (selected_top_k == TOP_K_FOR_MARKOV_STEP) {
         computation = keep_markov_head_computation(model, {"prev_token_ids"}, {"markov_bias"});
     } else {
-        computation = keep_markov_head_computation(model,
-                                                   {"draft_logits", "anchor_token_ids", "subsequence_begins"},
-                                                   {"edge_scores", "candidate_ids"});
+        // A gated head (dflash2) also reads the backbone hidden states of the scored rows.
+        std::vector<std::string> scorer_inputs{"draft_logits"};
+        if (has_port_named(model->inputs(), "draft_hidden_states")) {
+            scorer_inputs.push_back("draft_hidden_states");
+        }
+        scorer_inputs.push_back("anchor_token_ids");
+        scorer_inputs.push_back("subsequence_begins");
+        computation = keep_markov_head_computation(model, scorer_inputs, {"edge_scores", "candidate_ids"});
         if (selected_top_k != exported_top_k) {
             replace_markov_head_top_k(computation, static_cast<size_t>(selected_top_k));
         }
         computation->set_rt_info(std::to_string(selected_top_k), {"dflash", "top_k"});
     }
     properties[DFLASH_MARKOV_HEAD_COMPUTATION] = computation;
+}
+
+bool is_gated_scorer(const std::shared_ptr<ov::Model>& markov_head_computation) {
+    return markov_head_computation && has_port_named(markov_head_computation->inputs(), "draft_hidden_states");
+}
+
+void expose_draft_hidden_rows(std::shared_ptr<ov::Model>& draft_model) {
+    // Throws a clear ov::Exception when the graft has not produced a 'logits' output.
+    const auto logits = draft_model->output("logits");
+    const auto matmul = ov::as_type_ptr<ov::op::v0::MatMul>(logits.get_node_shared_ptr()->input_value(0).get_node_shared_ptr());
+    OPENVINO_ASSERT(matmul, "The draft 'logits' output is not produced by a MatMul.");
+    // After the PA conversion the tokens live in the batch dimension, so the gather output is
+    // [num_rows, seq, hidden] with seq = 1 - the same rows as the gathered logits, one to one.
+    const auto hidden_rows = matmul->input_value(0);
+    OPENVINO_ASSERT(hidden_rows.get_partial_shape().size() >= 2,
+                    "The gathered draft rows feeding the logits MatMul must be at least rank 2, got ",
+                    hidden_rows.get_partial_shape());
+    hidden_rows.get_tensor().set_names({"draft_hidden_states"});
+    draft_model->add_output(hidden_rows);
 }
 
 bool is_markov_step(const std::shared_ptr<ov::Model>& markov_head_computation) {
@@ -565,11 +590,18 @@ void validate_candidate_scorer(const std::shared_ptr<ov::Model>& candidate_score
                    top_k,
                    MIN_RECOMMENDED_MARKOV_HEAD_TOP_K);
     }
-    OPENVINO_ASSERT(candidate_scorer->inputs().size() == 3 && candidate_scorer->outputs().size() == 2,
-                    "The candidate scorer must map 'draft_logits', 'anchor_token_ids' and 'subsequence_begins' to "
-                    "'edge_scores' and 'candidate_ids'.");
+    OPENVINO_ASSERT((candidate_scorer->inputs().size() == 3 || candidate_scorer->inputs().size() == 4) &&
+                        candidate_scorer->outputs().size() == 2,
+                    "The candidate scorer must map 'draft_logits', 'anchor_token_ids' and 'subsequence_begins' (plus "
+                    "'draft_hidden_states' for a gated dflash2 head) to 'edge_scores' and 'candidate_ids'.");
+    const bool gated = candidate_scorer->inputs().size() == 4;
+    OPENVINO_ASSERT(!gated == !has_port_named(candidate_scorer->inputs(), "draft_hidden_states"),
+                    "A 4-input candidate scorer must have a 'draft_hidden_states' input.");
     const auto logits_shape =
         validate_markov_head_port(candidate_scorer->input("draft_logits"), model_name, ov::element::f32, 2);
+    if (gated) {
+        validate_markov_head_port(candidate_scorer->input("draft_hidden_states"), model_name, ov::element::f32, 2);
+    }
     validate_markov_head_port(candidate_scorer->input("anchor_token_ids"), model_name, ov::element::i64, 1);
     validate_markov_head_port(candidate_scorer->input("subsequence_begins"), model_name, ov::element::i64, 1);
     const auto edge_scores_shape =

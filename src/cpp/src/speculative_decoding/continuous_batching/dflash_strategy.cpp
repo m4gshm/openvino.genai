@@ -101,6 +101,10 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
     // The draft candidates are read at fixed rows of the gathered logits.
     OPENVINO_ASSERT(utils::has_input(draft_model, "sampled_tokens_indices"),
                     "DFlash draft model has no 'sampled_tokens_indices' input, so its candidate logits cannot be gathered.");
+    // A gated dflash2 head scores candidates with the backbone hidden states of the gathered rows.
+    if (m_rt_info.markov_rank > 0 && m_rt_info.markov_head_type == "dflash2") {
+        utils::dflash::expose_draft_hidden_rows(draft_model);
+    }
     validate_target_has_no_unmanaged_state(main_model);
     utils::dflash::expose_target_hidden_states(main_model, retained_hidden_state_locators, m_rt_info.target_layer_ids);
     utils::dflash::move_fc_from_draft_to_main(draft_model, main_model);

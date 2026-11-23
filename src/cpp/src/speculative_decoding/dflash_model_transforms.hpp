@@ -89,6 +89,22 @@ void select_markov_head_computation(const std::shared_ptr<ov::Model>& markov_hea
                                     ov::AnyMap& properties);
 
 /**
+ * @brief True when the kept computation is the gated candidate scorer of a DFlash2 head, which also reads the
+ * draft hidden states of the scored rows (`draft_hidden_states`).
+ */
+bool is_gated_scorer(const std::shared_ptr<ov::Model>& markov_head_computation);
+
+/**
+ * @brief Exposes the draft rows that feed the grafted lm_head as a `draft_hidden_states` output.
+ *
+ * The gated candidate scorer reads the backbone hidden states of the scored rows. Those rows are computed inside
+ * the draft graph right before the logits MatMul, and the gather-before-matmul transform has already narrowed them
+ * to the gathered candidate rows, so the scorer input matches the gathered logits row by row. Run after the
+ * gather transform and the lm_head graft, before the draft pipeline compiles the model.
+ */
+void expose_draft_hidden_rows(std::shared_ptr<ov::Model>& draft_model);
+
+/**
  * @brief True when a computation kept by select_markov_head_computation() is the dense step rather than the
  * candidate scorer. The scorer's K is its dflash/top_k RT info.
  */
