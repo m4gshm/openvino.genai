@@ -75,13 +75,7 @@ CandidateSelector::CandidateSelector(const utils::dflash::DFlashRTInfo& rt_info,
     } else {
         m_reads_hidden_states = utils::has_input(markov_head, "draft_hidden_states");
         m_candidate_scorer = std::move(request);
-        m_gated = utils::dflash::is_gated_scorer(markov_head);
     }
-}
-
-void CandidateSelector::set_hidden_rows_source(HiddenRowsSource source) {
-    OPENVINO_ASSERT(m_gated, "The hidden-row source applies only to a gated candidate scorer.");
-    m_hidden_rows_source = std::move(source);
 }
 
 void CandidateSelector::prepare(const std::vector<SampledBlock>& blocks, const ov::Tensor& logits) {
@@ -126,17 +120,6 @@ void CandidateSelector::score_candidates() {
     }
     scorer.set_tensor("anchor_token_ids", anchor_token_ids);
     scorer.set_tensor("subsequence_begins", subsequence_begins);
-    if (m_gated) {
-        OPENVINO_ASSERT(m_hidden_rows_source,
-                        "A gated candidate scorer needs a 'draft_hidden_states' source; load the draft through the "
-                        "DFlash pipeline so it is wired to the draft infer request.");
-        // The draft request holds the gathered rows as [num_rows, seq, hidden] with seq = 1 after the PA
-        // conversion; the scorer reads the packed [num_packed_rows, hidden] rows of the scored blocks.
-        const ov::Tensor rows = m_hidden_rows_source();
-        const size_t width = row_width(rows);
-        ov::Tensor flat(ov::element::f32, {rows.get_size() / width, width}, const_cast<void*>(rows.data()));
-        scorer.set_tensor("draft_hidden_states", packed_rows(flat, m_blocks, num_rows));
-    }
     infer(scorer);
 
     ov::Tensor edge_scores = scorer.get_tensor("edge_scores");
