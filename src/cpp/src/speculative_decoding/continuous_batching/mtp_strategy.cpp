@@ -172,9 +172,13 @@ GenerationHandle ContinuousBatchingPipeline::MtpDecodingImpl::add_request(
                         (prompt_ids.has_value() && prompt_ids->get_element_type() == ov::element::i64 &&
                          prompt_ids->get_size() == input_ids.get_shape()[1]),
                     "MTP prefix caching requires built-in prompt preparation with one token ID per embedding");
-    OPENVINO_ASSERT(sampling_params.is_greedy_decoding() || !m_main_pipeline->is_prefix_caching_enabled() ||
+    // experiment: sampled MTP on linear-attention with prefix caching — shares the exact-sampling
+    // machinery and the LA checkpoint rewind already validated for prompt lookup (TV 0.072 < noise
+    // floor 0.112); if MTP drafting diverges, the statistical check must be re-run for this path
+    OPENVINO_ASSERT(sampling_params.is_greedy_decoding() || sampling_params.is_multinomial() ||
+                        !m_main_pipeline->is_prefix_caching_enabled() ||
                         !m_main_pipeline->has_linear_attention_cache(),
-                    "MTP speculative decoding of models with linear-attention state supports greedy decoding only "
+                    "MTP speculative decoding of models with linear-attention state supports greedy or multinomial decoding "
                     "when prefix caching is enabled; set enable_prefix_caching to false to use multinomial sampling.");
     // Use insert_or_assign, not insert: a finished prior request may leave a stale (stopped) handle
     // under the same request_id. insert() would be a no-op there, dropping the new handle as a

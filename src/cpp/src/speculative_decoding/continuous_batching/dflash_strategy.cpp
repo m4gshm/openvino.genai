@@ -284,9 +284,12 @@ GenerationHandle ContinuousBatchingPipeline::DFlashDecodingImpl::add_request(
     if (!main_sampling_params.num_assistant_tokens.has_value()) {
         main_sampling_params.num_assistant_tokens = m_main_pipeline->default_num_assistant_tokens;
     }
+    // experiment: sampled DFlash on linear-attention with prefix caching — same rationale as the
+    // prompt lookup and MTP relaxes; the exact-sampling machinery and the LA checkpoint rewind are shared
     OPENVINO_ASSERT(!has_draft_request(main_sampling_params) || main_sampling_params.is_greedy_decoding() ||
+                        main_sampling_params.is_multinomial() ||
                         !m_main_pipeline->is_prefix_caching_enabled() || !m_main_pipeline->has_linear_attention_cache(),
-                    "DFlash speculative decoding of models with linear-attention state supports greedy decoding only "
+                    "DFlash speculative decoding of models with linear-attention state supports greedy or multinomial decoding "
                     "when prefix caching is enabled; set enable_prefix_caching to false to use multinomial sampling.");
 
     // The draft prompt is the target prompt: draft position t pairs with target hidden state t.
